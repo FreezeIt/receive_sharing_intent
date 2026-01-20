@@ -52,6 +52,7 @@ open class RSIShareViewController: SLComposeServiceViewController {
                                     self?.dismissWithError()
                                     return
                                 }
+                                
                                 switch type {
                                 case .text:
                                     if let text = data as? String {
@@ -67,15 +68,19 @@ open class RSIShareViewController: SLComposeServiceViewController {
                                                          index: index,
                                                          content: content)
                                     }
-                                default:
-                                    if let url = data as? URL {
+                                case .image:
+                                    if let img = data as? UIImage {
+                                        this.handleMedia(forUIImage: img, index: index, content: content)
+                                    } else if let url = data as? URL {
                                         this.handleMedia(forFile: url,
                                                          type: type,
                                                          index: index,
                                                          content: content)
                                     }
-                                    else if let image = data as? UIImage {
-                                        this.handleMedia(forUIImage: image,
+                                    
+                                default:
+                                    if let url = data as? URL {
+                                        this.handleMedia(forFile: url,
                                                          type: type,
                                                          index: index,
                                                          content: content)
@@ -127,17 +132,32 @@ open class RSIShareViewController: SLComposeServiceViewController {
             }
         }
     }
-
-    private func handleMedia(forUIImage image: UIImage, type: SharedMediaType, index: Int, content: NSExtensionItem){
-        let tempPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)!.appendingPathComponent("TempImage.png")
-        if self.writeTempFile(image, to: tempPath) {
-            let newPathDecoded = tempPath.absoluteString.removingPercentEncoding!
-            sharedMedia.append(SharedMediaFile(
-                path: newPathDecoded,
-                mimeType: type == .image ? "image/png": nil,
-                type: type
-            ))
+    
+    private func handleMedia(forFile url: URL, type: SharedMediaType, index: Int, content: NSExtensionItem) {
+        let fileName = getFileName(from: url, type: type)
+        let newPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)!.appendingPathComponent(fileName)
+        
+        if copyFile(at: url, to: newPath) {
+            if type == .video {
+                // Get video thumbnail and duration
+                if let videoInfo = getVideoInfo(from: url) {
+                    sharedMedia.append(SharedMediaFile(
+                        path: newPath.absoluteString,
+                        mimeType: url.mimeType(),
+                        thumbnail: videoInfo.thumbnail,
+                        duration: videoInfo.duration,
+                        type: type
+                    ))
+                }
+            } else {
+                sharedMedia.append(SharedMediaFile(
+                    path: newPath.absoluteString,
+                    mimeType: url.mimeType(),
+                    type: type
+                ))
+            }
         }
+        
         if index == (content.attachments?.count ?? 0) - 1 {
             if shouldAutoRedirect() {
                 saveAndRedirect()
@@ -145,32 +165,15 @@ open class RSIShareViewController: SLComposeServiceViewController {
         }
     }
     
-    private func handleMedia(forFile url: URL, type: SharedMediaType, index: Int, content: NSExtensionItem) {
-        let fileName = getFileName(from: url, type: type)
-        let newPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)!.appendingPathComponent(fileName)
-        
-        if copyFile(at: url, to: newPath) {
-            // The path should be decoded because Flutter is not expecting url encoded file names
-            let newPathDecoded = newPath.absoluteString.removingPercentEncoding!;
-            if type == .video {
-                // Get video thumbnail and duration
-                if let videoInfo = getVideoInfo(from: url) {
-                    let thumbnailPathDecoded = videoInfo.thumbnail?.removingPercentEncoding;
-                    sharedMedia.append(SharedMediaFile(
-                        path: newPathDecoded,
-                        mimeType: url.mimeType(),
-                        thumbnail: thumbnailPathDecoded,
-                        duration: videoInfo.duration,
-                        type: type
-                    ))
-                }
-            } else {
-                sharedMedia.append(SharedMediaFile(
-                    path: newPathDecoded,
-                    mimeType: url.mimeType(),
-                    type: type
-                ))
-            }
+    private func handleMedia(forUIImage image: UIImage, index: Int, content: NSExtensionItem) {
+        if let strBase64 = image.pngData()?.base64EncodedString() {
+            let url = "data:image/png;base64, " + strBase64;
+            
+            sharedMedia.append(SharedMediaFile(
+                path: url,
+                mimeType: "image/png",
+                type: .url
+            ))
         }
         
         if index == (content.attachments?.count ?? 0) - 1 {
@@ -195,25 +198,14 @@ open class RSIShareViewController: SLComposeServiceViewController {
         loadIds()
         let url = URL(string: "\(kSchemePrefix)-\(hostAppBundleIdentifier):share")
         var responder = self as UIResponder?
+        let selectorOpenURL = sel_registerName("openURL:")
         
-        if #available(iOS 18.0, *) {
-            while responder != nil {
-                if let application = responder as? UIApplication {
-                    application.open(url!, options: [:], completionHandler: nil)
-                }
-                responder = responder?.next
+        while (responder != nil) {
+            if (responder?.responds(to: selectorOpenURL))! {
+                _ = responder?.perform(selectorOpenURL, with: url)
             }
-        } else {
-            let selectorOpenURL = sel_registerName("openURL:")
-            
-            while (responder != nil) {
-                if (responder?.responds(to: selectorOpenURL))! {
-                    _ = responder?.perform(selectorOpenURL, with: url)
-                }
-                responder = responder!.next
-            }
+            responder = responder!.next
         }
-
         extensionContext!.completeRequest(returningItems: [], completionHandler: nil)
     }
     
@@ -245,20 +237,6 @@ open class RSIShareViewController: SLComposeServiceViewController {
             }
         }
         return name
-    }
-
-    private func writeTempFile(_ image: UIImage, to dstURL: URL) -> Bool {
-        do {
-            if FileManager.default.fileExists(atPath: dstURL.path) {
-                try FileManager.default.removeItem(at: dstURL)
-            }
-            let pngData = image.pngData();
-            try pngData?.write(to: dstURL);
-            return true;
-        } catch (let error){
-            print("Cannot write to temp file: \(error)");
-            return false;
-        }
     }
     
     private func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
