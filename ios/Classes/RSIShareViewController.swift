@@ -9,6 +9,7 @@ import UIKit
 import Social
 import MobileCoreServices
 import Photos
+import UniformTypeIdentifiers
 
 @available(swift, introduced: 5.0)
 open class RSIShareViewController: SLComposeServiceViewController {
@@ -45,6 +46,11 @@ open class RSIShareViewController: SLComposeServiceViewController {
         if let content = extensionContext!.inputItems[0] as? NSExtensionItem {
             if let contents = content.attachments {
                 for (index, attachment) in (contents).enumerated() {
+                    if handleCommaSeparatedText(attachment: attachment,
+                                                index: index,
+                                                content: content) {
+                        continue
+                    }
                     for type in SharedMediaType.allCases {
                         if attachment.hasItemConformingToTypeIdentifier(type.toUTTypeIdentifier) {
                             attachment.loadItem(forTypeIdentifier: type.toUTTypeIdentifier) { [weak self] data, error in
@@ -52,7 +58,6 @@ open class RSIShareViewController: SLComposeServiceViewController {
                                     self?.dismissWithError()
                                     return
                                 }
-                                
                                 switch type {
                                 case .text:
                                     if let text = data as? String {
@@ -68,19 +73,23 @@ open class RSIShareViewController: SLComposeServiceViewController {
                                                          index: index,
                                                          content: content)
                                     }
-                                case .image:
-                                    if let img = data as? UIImage {
-                                        this.handleMedia(forUIImage: img, index: index, content: content)
-                                    } else if let url = data as? URL {
+                              
+                                default:
+                                    if let url = data as? URL {
                                         this.handleMedia(forFile: url,
                                                          type: type,
                                                          index: index,
                                                          content: content)
                                     }
-                                    
-                                default:
-                                    if let url = data as? URL {
-                                        this.handleMedia(forFile: url,
+                                    else if let image = data as? UIImage {
+                                        this.handleMedia(forUIImage: image,
+                                                         type: type,
+                                                         index: index,
+                                                         content: content)
+                                    } else if type == .image,
+                                              let imageData = data as? Data,
+                                              let image = UIImage(data: imageData) {
+                                        this.handleMedia(forUIImage: image,
                                                          type: type,
                                                          index: index,
                                                          content: content)
@@ -119,6 +128,55 @@ open class RSIShareViewController: SLComposeServiceViewController {
         appGroupId = customAppGroupId ?? defaultAppGroupId
     }
     
+    private func handleCommaSeparatedText(attachment: NSItemProvider,
+                                          index: Int,
+                                          content: NSExtensionItem) -> Bool {
+        let csvTypeIdentifier: String
+        if #available(iOS 14.0, *) {
+            csvTypeIdentifier = UTType.commaSeparatedText.identifier
+        } else {
+            csvTypeIdentifier = "public.comma-separated-values-text"
+        }
+
+        guard attachment.hasItemConformingToTypeIdentifier(csvTypeIdentifier) else {
+            return false
+        }
+
+        attachment.loadItem(forTypeIdentifier: csvTypeIdentifier) { [weak self] data, error in
+            guard let this = self, error == nil else {
+                self?.dismissWithError()
+                return
+            }
+
+            if let url = data as? URL {
+                this.handleMedia(forFile: url,
+                                 type: .file,
+                                 index: index,
+                                 content: content)
+                return
+            }
+
+            if let text = data as? String,
+               let fileUrl = this.writeTempFile(text, fileExtension: "csv") {
+                this.handleMedia(forFile: fileUrl,
+                                 type: .file,
+                                 index: index,
+                                 content: content)
+                return
+            }
+
+            if let rawData = data as? Data,
+               let fileUrl = this.writeTempFile(rawData, fileExtension: "csv") {
+                this.handleMedia(forFile: fileUrl,
+                                 type: .file,
+                                 index: index,
+                                 content: content)
+            }
+        }
+
+        return true
+    }
+
     
     private func handleMedia(forLiteral item: String, type: SharedMediaType, index: Int, content: NSExtensionItem) {
         sharedMedia.append(SharedMediaFile(
@@ -132,32 +190,17 @@ open class RSIShareViewController: SLComposeServiceViewController {
             }
         }
     }
-    
-    private func handleMedia(forFile url: URL, type: SharedMediaType, index: Int, content: NSExtensionItem) {
-        let fileName = getFileName(from: url, type: type)
-        let newPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)!.appendingPathComponent(fileName)
-        
-        if copyFile(at: url, to: newPath) {
-            if type == .video {
-                // Get video thumbnail and duration
-                if let videoInfo = getVideoInfo(from: url) {
-                    sharedMedia.append(SharedMediaFile(
-                        path: newPath.absoluteString,
-                        mimeType: url.mimeType(),
-                        thumbnail: videoInfo.thumbnail,
-                        duration: videoInfo.duration,
-                        type: type
-                    ))
-                }
-            } else {
-                sharedMedia.append(SharedMediaFile(
-                    path: newPath.absoluteString,
-                    mimeType: url.mimeType(),
-                    type: type
-                ))
-            }
+
+    private func handleMedia(forUIImage image: UIImage, type: SharedMediaType, index: Int, content: NSExtensionItem){
+        let tempPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)!.appendingPathComponent("TempImage.png")
+        if self.writeTempFile(image, to: tempPath) {
+            let newPathDecoded = tempPath.absoluteString.removingPercentEncoding!
+            sharedMedia.append(SharedMediaFile(
+                path: newPathDecoded,
+                mimeType: type == .image ? "image/png": nil,
+                type: type
+            ))
         }
-        
         if index == (content.attachments?.count ?? 0) - 1 {
             if shouldAutoRedirect() {
                 saveAndRedirect()
@@ -165,15 +208,32 @@ open class RSIShareViewController: SLComposeServiceViewController {
         }
     }
     
-    private func handleMedia(forUIImage image: UIImage, index: Int, content: NSExtensionItem) {
-        if let strBase64 = image.pngData()?.base64EncodedString() {
-            let url = "data:image/png;base64, " + strBase64;
-            
-            sharedMedia.append(SharedMediaFile(
-                path: url,
-                mimeType: "image/png",
-                type: .url
-            ))
+    private func handleMedia(forFile url: URL, type: SharedMediaType, index: Int, content: NSExtensionItem) {
+        let fileName = getFileName(from: url, type: type)
+        let newPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId)!.appendingPathComponent(fileName)
+        
+        if copyFile(at: url, to: newPath) {
+            // The path should be decoded because Flutter is not expecting url encoded file names
+            let newPathDecoded = newPath.absoluteString.removingPercentEncoding!;
+            if type == .video {
+                // Get video thumbnail and duration
+                if let videoInfo = getVideoInfo(from: url) {
+                    let thumbnailPathDecoded = videoInfo.thumbnail?.removingPercentEncoding;
+                    sharedMedia.append(SharedMediaFile(
+                        path: newPathDecoded,
+                        mimeType: url.mimeType(),
+                        thumbnail: thumbnailPathDecoded,
+                        duration: videoInfo.duration,
+                        type: type
+                    ))
+                }
+            } else {
+                sharedMedia.append(SharedMediaFile(
+                    path: newPathDecoded,
+                    mimeType: url.mimeType(),
+                    type: type
+                ))
+            }
         }
         
         if index == (content.attachments?.count ?? 0) - 1 {
@@ -198,14 +258,25 @@ open class RSIShareViewController: SLComposeServiceViewController {
         loadIds()
         let url = URL(string: "\(kSchemePrefix)-\(hostAppBundleIdentifier):share")
         var responder = self as UIResponder?
-        let selectorOpenURL = sel_registerName("openURL:")
         
-        while (responder != nil) {
-            if (responder?.responds(to: selectorOpenURL))! {
-                _ = responder?.perform(selectorOpenURL, with: url)
+        if #available(iOS 18.0, *) {
+            while responder != nil {
+                if let application = responder as? UIApplication {
+                    application.open(url!, options: [:], completionHandler: nil)
+                }
+                responder = responder?.next
             }
-            responder = responder!.next
+        } else {
+            let selectorOpenURL = sel_registerName("openURL:")
+            
+            while (responder != nil) {
+                if (responder?.responds(to: selectorOpenURL))! {
+                    _ = responder?.perform(selectorOpenURL, with: url)
+                }
+                responder = responder!.next
+            }
         }
+
         extensionContext!.completeRequest(returningItems: [], completionHandler: nil)
     }
     
@@ -237,6 +308,43 @@ open class RSIShareViewController: SLComposeServiceViewController {
             }
         }
         return name
+    }
+
+    private func writeTempFile(_ image: UIImage, to dstURL: URL) -> Bool {
+        do {
+            if FileManager.default.fileExists(atPath: dstURL.path) {
+                try FileManager.default.removeItem(at: dstURL)
+            }
+            let pngData = image.pngData();
+            try pngData?.write(to: dstURL);
+            return true;
+        } catch (let error){
+            print("Cannot write to temp file: \(error)");
+            return false;
+        }
+    }
+
+    private func writeTempFile(_ data: Data, fileExtension: String) -> URL? {
+        let fileName = "\(UUID().uuidString).\(fileExtension)"
+        let dstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(fileName)
+        do {
+            if FileManager.default.fileExists(atPath: dstURL.path) {
+                try FileManager.default.removeItem(at: dstURL)
+            }
+            try data.write(to: dstURL)
+            return dstURL
+        } catch (let error) {
+            print("Cannot write to temp file: \(error)")
+            return nil
+        }
+    }
+
+    private func writeTempFile(_ text: String, fileExtension: String) -> URL? {
+        guard let data = text.data(using: .utf8) else {
+            return nil
+        }
+        return writeTempFile(data, fileExtension: fileExtension)
     }
     
     private func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
