@@ -51,9 +51,12 @@ open class RSIShareViewController: SLComposeServiceViewController {
                                                 content: content) {
                         continue
                     }
+                    var handled = false
                     for type in SharedMediaType.allCases {
-                        if attachment.hasItemConformingToTypeIdentifier(type.toUTTypeIdentifier) {
-                            attachment.loadItem(forTypeIdentifier: type.toUTTypeIdentifier) { [weak self] data, error in
+                        let typeIdentifier = matchedTypeIdentifier(for: attachment, type: type)
+                        if let typeIdentifier {
+                            handled = true
+                            attachment.loadItem(forTypeIdentifier: typeIdentifier) { [weak self] data, error in
                                 guard let this = self, error == nil else {
                                     self?.dismissWithError()
                                     return
@@ -86,6 +89,18 @@ open class RSIShareViewController: SLComposeServiceViewController {
                                                          type: type,
                                                          index: index,
                                                          content: content)
+                                    } else if type == .file,
+                                              let rawData = data as? Data {
+                                        let fileExtension = this.fileExtension(
+                                            for: attachment,
+                                            fallback: typeIdentifier
+                                        )
+                                        if let fileUrl = this.writeTempFile(rawData, fileExtension: fileExtension) {
+                                            this.handleMedia(forFile: fileUrl,
+                                                             type: type,
+                                                             index: index,
+                                                             content: content)
+                                        }
                                     } else if type == .image,
                                               let imageData = data as? Data,
                                               let image = UIImage(data: imageData) {
@@ -98,6 +113,11 @@ open class RSIShareViewController: SLComposeServiceViewController {
                             }
                             break
                         }
+                    }
+                    if !handled {
+                        handleAnyAttachment(attachment: attachment,
+                                            index: index,
+                                            content: content)
                     }
                 }
             }
@@ -345,6 +365,94 @@ open class RSIShareViewController: SLComposeServiceViewController {
             return nil
         }
         return writeTempFile(data, fileExtension: fileExtension)
+    }
+
+    private func matchedTypeIdentifier(for attachment: NSItemProvider,
+                                       type: SharedMediaType) -> String? {
+        if type != .file {
+            return attachment.hasItemConformingToTypeIdentifier(type.toUTTypeIdentifier)
+                ? type.toUTTypeIdentifier
+                : nil
+        }
+
+        let candidates = [
+            type.toUTTypeIdentifier,
+            UTType.pdf.identifier,
+            "com.adobe.pdf",
+            UTType.data.identifier,
+            UTType.item.identifier
+        ]
+
+        return candidates.first { attachment.hasItemConformingToTypeIdentifier($0) }
+    }
+
+    private func fileExtension(for attachment: NSItemProvider, fallback: String) -> String {
+        let suggestedName = attachment.suggestedName ?? ""
+        let extensionFromName = URL(fileURLWithPath: suggestedName).pathExtension
+
+        if !extensionFromName.isEmpty {
+            return extensionFromName
+        }
+
+        if fallback == "com.adobe.pdf" {
+            return "pdf"
+        }
+
+        return "file"
+    }
+
+    private func handleAnyAttachment(attachment: NSItemProvider,
+                                     index: Int,
+                                     content: NSExtensionItem) {
+        let identifiers = attachment.registeredTypeIdentifiers
+        guard !identifiers.isEmpty else {
+            return
+        }
+
+        let preferredIdentifiers = [
+            "public.file-url",
+            "public.data",
+            "public.item",
+            "public.content",
+            "com.adobe.pdf"
+        ]
+
+        let typeIdentifier = preferredIdentifiers.first(where: { identifiers.contains($0) })
+            ?? identifiers.first!
+
+        attachment.loadItem(forTypeIdentifier: typeIdentifier) { [weak self] data, error in
+            guard let this = self, error == nil else {
+                self?.dismissWithError()
+                return
+            }
+
+            if let url = data as? URL {
+                this.handleMedia(forFile: url,
+                                 type: .file,
+                                 index: index,
+                                 content: content)
+                return
+            }
+
+            if let text = data as? String,
+               let fileUrl = this.writeTempFile(text, fileExtension: this.fileExtension(for: attachment, fallback: typeIdentifier)) {
+                this.handleMedia(forFile: fileUrl,
+                                 type: .file,
+                                 index: index,
+                                 content: content)
+                return
+            }
+
+            if let rawData = data as? Data {
+                let fileExtension = this.fileExtension(for: attachment, fallback: typeIdentifier)
+                if let fileUrl = this.writeTempFile(rawData, fileExtension: fileExtension) {
+                    this.handleMedia(forFile: fileUrl,
+                                     type: .file,
+                                     index: index,
+                                     content: content)
+                }
+            }
+        }
     }
     
     private func copyFile(at srcURL: URL, to dstURL: URL) -> Bool {
