@@ -378,9 +378,7 @@ open class RSIShareViewController: SLComposeServiceViewController {
         let candidates = [
             type.toUTTypeIdentifier,
             UTType.pdf.identifier,
-            "com.adobe.pdf",
-            UTType.data.identifier,
-            UTType.item.identifier
+            "com.adobe.pdf"
         ]
 
         return candidates.first { attachment.hasItemConformingToTypeIdentifier($0) }
